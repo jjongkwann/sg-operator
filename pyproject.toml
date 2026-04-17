@@ -1,0 +1,24 @@
+[project]
+name = "emlfit"
+version = "0.1.0"
+description = "Symbolic regression with a single EML operator: eml(x, y) = exp(x) - ln(y)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "jk" }]
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "sympy>=1.12",
+]
+
+[project.optional-dependencies]
+examples = ["matplotlib>=3.7"]
+dev = ["pytest>=7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["emlfit"]
