@@ -42,3 +42,13 @@ def test_brute_force_recovers_clean_exp_formula():
     # The constant leaf should snap to 1 (via brute force candidate set).
     const_leaf = next(leaf for leaf in leaves if leaf["kind"] == "const")
     assert abs(const_leaf["value"] - 1.0) < 0.01
+
+
+def test_mixed_ops_recover_pi_r_squared():
+    # With mul enabled, pi*r^2 = mul(mul(pi, 1), mul(r, r)) at depth 2.
+    r = np.linspace(0.3, 2.5, 128).reshape(-1, 1).astype(np.float32)
+    y = (np.pi * r[:, 0] ** 2).astype(np.float32)
+    model = EMLRegressor(
+        depth=2, ops=("eml", "mul"), epochs=300, n_restarts=1
+    ).fit(r, y)
+    assert model.score(r, y) > 0.999

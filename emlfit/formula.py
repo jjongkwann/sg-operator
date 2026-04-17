@@ -1,10 +1,4 @@
-"""Symbolic extraction from a trained EML tree.
-
-Discrete leaf assignments (from refinement or argmax snap) fold upward through
-the EML operator into a sympy expression. Log arguments are wrapped in Abs to
-mirror safe_eml's training-time behavior; real-valued predictions stay
-consistent with the trained tree even when a leaf is negative.
-"""
+"""Symbolic extraction from a trained tree (mixed-op supported)."""
 
 from __future__ import annotations
 
@@ -43,13 +37,25 @@ def _snap_constant(value: float, tol: float = 0.02) -> sp.Expr:
     return sp.Float(round(value, 4))
 
 
+def _apply_op(op: str, left: sp.Expr, right: sp.Expr) -> sp.Expr:
+    if op == "eml":
+        return sp.exp(left) - sp.log(sp.Abs(right))
+    if op == "add":
+        return left + right
+    if op == "sub":
+        return left - right
+    if op == "mul":
+        return left * right
+    raise ValueError(f"unknown op: {op}")
+
+
 def extract_formula(
     tree: EMLTree,
     leaves: list[dict] | None = None,
+    ops: list[str] | None = None,
     input_names=None,
     snap: bool = True,
 ) -> sp.Expr:
-    """Return a sympy expression for the tree with the given leaf assignment."""
     n_inputs = tree.n_inputs
     if input_names is None:
         input_names = [f"x{i}" if n_inputs > 1 else "x" for i in range(n_inputs)]
@@ -57,6 +63,8 @@ def extract_formula(
 
     if leaves is None:
         leaves = tree.discrete_leaves()
+    if ops is None:
+        ops = tree.discrete_ops()
 
     expr_leaves: list[sp.Expr] = []
     for leaf in leaves:
@@ -66,12 +74,12 @@ def extract_formula(
             v = leaf["value"]
             expr_leaves.append(_snap_constant(v) if snap else sp.Float(round(v, 4)))
 
-    # eml(x, y) = exp(x) - log(|y|) — Abs mirrors safe_eml's training behavior.
+    idx = 0
     while len(expr_leaves) > 1:
         nxt = []
         for i in range(0, len(expr_leaves), 2):
-            left, right = expr_leaves[i], expr_leaves[i + 1]
-            nxt.append(sp.exp(left) - sp.log(sp.Abs(right)))
+            nxt.append(_apply_op(ops[idx], expr_leaves[i], expr_leaves[i + 1]))
+            idx += 1
         expr_leaves = nxt
 
     return sp.simplify(expr_leaves[0])

@@ -10,34 +10,38 @@ from .refine import refine
 
 
 class EMLRegressor:
-    """Fit an EML tree to numeric data, then predict / extract a formula.
+    """Fit a mixed-operator tree (default: eml-only) to data.
 
-    Training pipeline per restart:
-      1. Gradient training of soft-selection EML tree (Adam).
-      2. Discrete refinement: greedy search over clean leaf assignments.
-    Best restart (lowest refined MSE) wins.
+    Pass ops=("eml", "mul", "add") to enable practical formula discovery like
+    pi*r^2. Pure EML (ops=("eml",)) preserves the paper's single-operator
+    property but restricts what's reachable at shallow depth.
     """
 
     def __init__(
         self,
         depth: int = 3,
+        ops: tuple[str, ...] = ("eml",),
         epochs: int = 2000,
         lr: float = 0.05,
         n_restarts: int = 4,
         refine_passes: int = 3,
+        max_bf_combinations: int = 10_000_000,
         device: str | None = None,
         verbose: bool = False,
     ):
         self.depth = depth
+        self.ops = ops
         self.epochs = epochs
         self.lr = lr
         self.n_restarts = n_restarts
         self.refine_passes = refine_passes
+        self.max_bf_combinations = max_bf_combinations
         self.device = device or _default_device()
         self.verbose = verbose
 
         self.model_: EMLTree | None = None
         self.leaves_: list[dict] | None = None
+        self.ops_: list[str] | None = None
         self.loss_: float | None = None
 
     def _as_tensor(self, X, y=None):
@@ -54,13 +58,14 @@ class EMLRegressor:
         Xt, yt = self._as_tensor(X, y)
         n_inputs = Xt.size(1)
 
-        best_model, best_leaves, best_loss = None, None, float("inf")
+        best_model, best_leaves, best_ops, best_loss = None, None, None, float("inf")
         for restart in range(self.n_restarts):
             torch.manual_seed(restart)
-            model = EMLTree(depth=self.depth, n_inputs=n_inputs).to(self.device)
+            model = EMLTree(
+                depth=self.depth, n_inputs=n_inputs, ops=self.ops
+            ).to(self.device)
             opt = torch.optim.Adam(model.parameters(), lr=self.lr)
 
-            # Mild temperature anneal (1 -> 0.5) — refinement does the final commit.
             for epoch in range(self.epochs):
                 model.temperature = 1.0 - 0.5 * (epoch / max(1, self.epochs - 1))
                 opt.zero_grad()
@@ -77,22 +82,28 @@ class EMLRegressor:
                     print(f"restart {restart}: diverged")
                 continue
 
-            leaves, refined_loss = refine(model, Xt, yt, n_passes=self.refine_passes)
+            leaves, ops_, refined_loss = refine(
+                model, Xt, yt,
+                n_passes=self.refine_passes,
+                max_bf_combinations=self.max_bf_combinations,
+            )
             if self.verbose:
                 print(
-                    f"restart {restart}: soft_loss={float(loss.item()):.4g} "
-                    f"refined_loss={refined_loss:.4g}"
+                    f"restart {restart}: soft={float(loss.item()):.4g} "
+                    f"refined={refined_loss:.4g}"
                 )
             if refined_loss < best_loss:
                 best_loss = refined_loss
                 best_model = model
                 best_leaves = leaves
+                best_ops = ops_
 
         if best_model is None:
             raise RuntimeError("All restarts diverged; try lowering lr or depth.")
 
         self.model_ = best_model
         self.leaves_ = best_leaves
+        self.ops_ = best_ops
         self.loss_ = best_loss
         return self
 
@@ -100,7 +111,7 @@ class EMLRegressor:
         self._check_fitted()
         Xt = self._as_tensor(X)
         with torch.no_grad():
-            return self.model_.evaluate_leaves(Xt, self.leaves_).cpu().numpy()
+            return self.model_.evaluate(Xt, self.leaves_, self.ops_).cpu().numpy()
 
     def score(self, X, y) -> float:
         yhat = self.predict(X)
@@ -114,7 +125,11 @@ class EMLRegressor:
 
         self._check_fitted()
         return extract_formula(
-            self.model_, leaves=self.leaves_, input_names=input_names, snap=snap
+            self.model_,
+            leaves=self.leaves_,
+            ops=self.ops_,
+            input_names=input_names,
+            snap=snap,
         )
 
     def _check_fitted(self):
