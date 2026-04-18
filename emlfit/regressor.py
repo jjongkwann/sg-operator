@@ -24,7 +24,8 @@ class EMLRegressor:
         epochs: int = 2000,
         lr: float = 0.05,
         n_restarts: int = 4,
-        refine_passes: int = 3,
+        beam_width: int = 32,
+        beam_iterations: int = 30,
         max_bf_combinations: int = 10_000_000,
         device: str | None = None,
         verbose: bool = False,
@@ -34,7 +35,8 @@ class EMLRegressor:
         self.epochs = epochs
         self.lr = lr
         self.n_restarts = n_restarts
-        self.refine_passes = refine_passes
+        self.beam_width = beam_width
+        self.beam_iterations = beam_iterations
         self.max_bf_combinations = max_bf_combinations
         self.device = device or _default_device()
         self.verbose = verbose
@@ -84,8 +86,9 @@ class EMLRegressor:
 
             leaves, ops_, refined_loss = refine(
                 model, Xt, yt,
-                n_passes=self.refine_passes,
                 max_bf_combinations=self.max_bf_combinations,
+                beam_width=self.beam_width,
+                beam_iterations=self.beam_iterations,
             )
             if self.verbose:
                 print(

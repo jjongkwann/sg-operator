@@ -1,14 +1,19 @@
 # emlfit
 
-Symbolic regression built on a single operator:
+Symbolic regression on binary trees. Internal nodes pick an operator from a
+configurable set (`eml`, `add`, `sub`, `mul`); leaves pick an input feature or
+a clean constant. Inspired by the EML operator of Odrzywołek (2026), *All
+elementary functions from a single operator* (arXiv:2603.21852):
 
 ```
 eml(x, y) = exp(x) − ln(y)
 ```
 
-Based on Odrzywołek (2026), *All elementary functions from a single operator* (arXiv:2603.21852). Every EML expression is a uniform binary tree, so leaf assignments fully determine the formula. At shallow depths the search space is small enough for **brute-force exhaustive search** over a clean candidate set — gradient descent is only needed as a fallback for deeper trees.
+Shallow search spaces are enumerated exhaustively with batched GPU-friendly
+evaluation; deeper trees fall back to beam search seeded by a gradient
+warm-up.
 
-## Install (dev)
+## Install
 
 ```bash
 uv venv
@@ -21,35 +26,50 @@ uv pip install -e .
 import numpy as np
 from emlfit import EMLRegressor
 
-x = np.linspace(-1, 1.5, 200).reshape(-1, 1)
-y = np.exp(x[:, 0])
+r = np.linspace(0.3, 2.5, 200).reshape(-1, 1)
+y = np.pi * r[:, 0] ** 2
 
-model = EMLRegressor(depth=1).fit(x, y)
-print(model.formula())   # exp(x)
-print(model.score(x, y)) # 1.000000
+model = EMLRegressor(depth=2, ops=("eml", "mul")).fit(r, y)
+print(model.formula(input_names=["r"]))  # pi*r**2
+print(model.score(r, y))                 # 1.000000
 ```
 
-## Demo output
+## What it finds
 
-```
-$ python examples/demo.py
-
-=== y = exp(x) (depth=1) ===            formula ≈ exp(x)                   R² = 1.000000
-=== y = 1 - log(x) (depth=1) ===        formula ≈ 1 - log(Abs(x))          R² = 1.000000
-=== y = exp(x) - log(x) (depth=1) ===   formula ≈ exp(x) - log(Abs(x))     R² = 1.000000
-=== y = exp(x1) - log(x2) (depth=1) === formula ≈ exp(x0) - log(Abs(x1))   R² = 1.000000
-=== y = exp(exp(x)) (depth=2) ===       formula ≈ exp(exp(x))              R² = 1.000000
-=== y = e  (constant) (depth=1) ===     formula ≈ E                        loss = 1e-8
-```
+| Target              | Depth | Ops                   | Result             | Time |
+| ------------------- | ----- | --------------------- | ------------------ | ---- |
+| `exp(x)`            | 1     | `(eml,)`              | `exp(x)`           | <1s  |
+| `exp(x) - log(x)`   | 1     | `(eml,)`              | `exp(x) - log|x|`  | <1s  |
+| `exp(exp(x))`       | 2     | `(eml,)`              | `exp(exp(x))`      | ~1s  |
+| `π*r²`              | 2     | `(eml, mul)`          | `pi*r**2`          | ~30s |
+| `2π*r`              | 2     | `(eml, mul)`          | `2*pi*r`           | ~30s |
+| `a² - b²`           | 2     | `(mul, add, sub)`     | `(a-b)*(a+b)`      | ~2m  |
+| `a² + b² + c²`      | 3     | `(mul, add)`          | partial (R²≈0.73)  | ~1m  |
+| `2πr` at depth 3    | 3     | eml-only              | — not reachable    |      |
 
 ## How it works
 
-1. **Gradient warm-up** (Adam): trains a soft EML tree where each leaf is a softmax mixture over inputs and a learnable constant.
-2. **Discrete refinement**: at depth ≤ 2 (≤ ~100k configurations), enumerate every assignment from a fixed candidate pool: `{inputs} ∪ {0, ±1, ±2, ±3, ±½, ±e, ±π, π/2, 2π, 1/e}`. At deeper depths, greedy per-leaf search seeded by argmax snap.
-3. **Symbolic extraction**: fold the discrete leaves through `sp.exp(x) - sp.log(Abs(y))`; mirrors training-time numeric behavior.
+1. **Gradient warm-up** (Adam): trains a soft tree where each leaf is a softmax mixture of inputs and a learnable constant, and each internal node is a softmax mixture of the allowed operators.
+2. **Discrete refinement**: 
+   - `brute_force`: exhausts (ops^n_internal) × (candidates^n_leaves) configs when below the budget. Batched in groups of ~4k and evaluated in a single tensor op.
+   - `beam_search`: maintains top-K candidates, expands by single-slot changes (leaf or op). Seeded from argmax snap + random restarts. Used when brute force is infeasible (depth ≥ 3 with mixed ops).
+   - `greedy` polish follows beam search.
+3. **Symbolic extraction** (`sympy`): folds discrete leaves through `exp(x) - log(|y|)` for EML nodes, or the direct arithmetic op. Constants snap to `{0, ±1, ±2, ½, e, π, π/2, 2π, 1/e}` when close.
+
+## Candidate pool
+
+Default constants tried at every leaf: `{0, 1, -1, 2, ½, e, π, 2π}`. Kept tight so brute force at depth 2 stays under 5M configurations.
 
 ## Limitations
 
-- Only elementary functions expressible within the chosen depth are recoverable. `2πr` needs deeper trees than depth 3.
-- Log arguments use `|y|` (matches `safe_eml`); the paper's full form uses complex numbers.
-- Depth ≥ 3 relies on greedy refinement — quality varies; restart count helps.
+- **Depth 3+ with complex targets** (e.g. `a²+b²+c²`) — beam search's single-slot neighborhood gets stuck in local minima. A full evolutionary search (PySR-style) would do better; planned.
+- **Log arguments use `|y|`**, mirroring `safe_eml`. The paper's full construction uses complex numbers; we stay real for regression use-cases.
+- **High dimensions** — candidate pool grows linearly with input count; depth ≤ 2 brute force still tractable up to ~8 inputs.
+- **No noise handling yet** — constants snap by absolute tolerance, which is brittle near zero in noisy data.
+
+## Roadmap
+
+- [ ] Evolutionary search for depth ≥ 3 (crossover between beam members)
+- [ ] Bootstrap: treat discovered sub-trees (`e`, `ln(x)`, `x²`) as leaves for the next search
+- [ ] Noise-aware constant snapping
+- [ ] Feynman Symbolic Regression Benchmark comparison vs PySR
